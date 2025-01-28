@@ -1,2 +1,2 @@
-# Superposition-and-SAEs\
+# Superposition-and-SAEs
 This is a mini-project of sorts which I worked on while learning about Superposition. The resource I used for learning the content is this https://arena-chapter1-transformer-interp.streamlit.app/.
