@@ -90,14 +90,19 @@ class ToyModel(nn.Module):
         return F.relu(out+self.b_final)
     
     def generate_batch(self,batch_size:int) -> Float[Tensor, "batch inst feats"]:
-        raise NotImplementedError()
+        batch_shape = (batch_size, self.cfg.n_inst, self.cfg.n_features)
+        feat_mag = torch.rand(batch_shape, device=self.W.device)
+        feat_seeds = torch.rand(batch_shape,device = self.W.device)
+        return torch.where(feat_seeds <= self.feature_probability,feat_mag,0.0)
     
     def calculate_loss(
         self,
         out: Float[Tensor, "batch inst feats"],
         batch: Float[Tensor, "batch inst feats"],
     ) -> Float[Tensor,""]:
-        raise NotImplementedError()
+        error = self.importance * ((batch - out)**2)
+        loss = einops.reduce(error,"batch inst feats -> inst","mean").sum()
+        return loss
 
     def optimize(
         self,
