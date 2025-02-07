@@ -23,20 +23,22 @@ device = torch.device("mps" if torch.backends.mps.is_available() else 'cuda' if 
 
 MAIN = __name__ == "__main__"
 # %%
-torch.manual_seed(42)
+if MAIN:
+    torch.manual_seed(42)
 
-W = torch.randn(2,5)
-W_normed = W/W.norm(dim=0, keepdim=True)
+    W = torch.randn(2,5)
+    W_normed = W/W.norm(dim=0, keepdim=True)
 
-px.imshow(
-    W_normed.T @ W_normed,
-    title="Cosine similarities of each pair of 2D feature embeddings",
-    width = 600,
-)
+    px.imshow(
+        W_normed.T @ W_normed,
+        title="Cosine similarities of each pair of 2D feature embeddings",
+        width = 600,
+    )
 # %%
-arena_utils.plot_features_in_2d(
-    W_normed.unsqueeze(0),
-)
+if MAIN:
+    arena_utils.plot_features_in_2d(
+        W_normed.unsqueeze(0),
+    )
 # %%
 def linear_lr(step,steps):
     return 1-(step/steps)
@@ -77,7 +79,7 @@ class ToyModel(nn.Module):
             importance = torch.tensor(importance)
         self.importance = importance.to(device).broadcast_to((cfg.n_inst,cfg.n_features))
         
-        self.W = nn.Parameter(nn.init.xavier_normal_(torch.empty((cfg.n_inst,cfg.n_hidden,cfg.n_features))))
+        self.W = nn.Parameter(nn.init.xavier_normal_(torch.empty((cfg.n_inst,cfg.d_hidden,cfg.n_features))))
         self.b_final = nn.Parameter(torch.zeros((cfg.n_inst,cfg.n_features)))
         self.to(device)
 
@@ -85,7 +87,7 @@ class ToyModel(nn.Module):
         self,
         features: Float[Tensor, "... inst feats"],
     ) -> Float[Tensor, "... inst feats"]:
-        h = einops.einsum(features,self.W,"... inst feats, inst hidden feats")
+        h = einops.einsum(features,self.W,"... inst feats, inst hidden feats -> ... inst hidden")
         out = einops.einsum(h,self.W,"... inst hidden, inst hidden feats -> ... inst feats")
         return F.relu(out+self.b_final)
     
@@ -130,3 +132,99 @@ class ToyModel(nn.Module):
             if step%log_freq == 0 or (step+1 == steps):
                 progress_bar.set_postfix(loss = loss.item() / self.cfg.n_inst, lr = step_lr)
 # %%
+if MAIN:
+    cfg = ToyModelConfig(n_inst=8, n_features=5, d_hidden=2)
+    importance = 0.9**torch.arange(cfg.n_features)
+    feature_probability = 50** -torch.linspace(0,1,cfg.n_inst)
+    px.line(
+        importance,
+        width=600,
+        height=400,
+        title="Importance of each feature (same over all instances)",
+        labels = {"y": "Feature importance", "x":"Feature"},
+    )
+    px.line(
+        feature_probability,
+        width=600,
+        height=400,
+        title="Feature probability (varied over instances)",
+        labels={"y": "Probability","x":"Instance"},
+    )
+    model = ToyModel(
+        cfg = cfg,
+        device=device,
+        importance=importance[None,:],
+        feature_probability=feature_probability[:,None],
+    )
+    model.optimize()
+# %%
+if MAIN:
+    arena_utils.plot_features_in_2d(
+        model.W,
+        colors = model.importance,
+        title=f"Superposition: {cfg.n_features} features represented in 2D space",subplot_titles=[f"1 - S = {i:.3f}"for i in feature_probability.squeeze()],
+    )
+# %%
+if MAIN:
+    with torch.inference_mode():
+        batch = model.generate_batch(200)
+        hidden = einops.einsum(batch,model.W,"batch instances features, instances hidden features -> instances hidden batch")
+
+    arena_utils.plot_features_in_2d(hidden,title="Hidden state representation of a random batch of data")
+
+# %%
+if MAIN:
+    cfg = ToyModelConfig(n_inst=10,n_features=100,d_hidden=20)
+
+    importance = 100 ** -torch.linspace(0,1,cfg.n_features)
+    feature_probability = 20 ** -torch.linspace(0,1,cfg.n_inst)
+
+    px.line(
+        importance,
+        width = 600,
+        height =400,
+        title = "Feature importance (same over all instances)",
+        labels = {"y": "Importance", "x":"Feature"},
+    )
+
+    px.line(
+        feature_probability,
+        width = 600,
+        height = 400,
+        title="Feature probability (varied over instances)",
+        labels={"y":"Probability","x": "Instance"},
+    )
+
+    model = ToyModel(
+        cfg = cfg,
+        device = device,
+        importance= importance[None,:],
+        feature_probability=feature_probability[:,None],
+    )
+    
+    model.optimize(steps=10_000)
+# %%
+if MAIN:
+    arena_utils.plot_features_in_Nd(
+        model.W,
+        height = 800,
+        width = 1600,
+        title="ReLU output model: n_features = 80, d_hidden = 20, I<sub>i</sub> = 0.9<sup>i</sup>",
+        subplot_titles=[f"Feature prob = {i:.3f}" for i in feature_probability],
+    )
+# %%
+def generate_correlated_features(
+    self: ToyModel, batch_size: int, n_correlated_pairs: int
+) -> Float[Tensor, "batch inst 2*n_correlated_pairs"]:
+    assert torch.all((self.feature_probability == self.feature_probability[:,[0]]))
+    p = self.feature_probability[:,[0]]
+
+    feat_mag = torch.rand((batch_size,self.cfg.n_inst,2*n_correlated_pairs),device=self.W.device)
+    feat_set_seeds = torch.rand((batch_size,self.cfg.n_inst, n_correlated_pairs),device = self.W.device)
+    feat_set_is_present = feat_set_seeds <= p
+    feat_is_present = einops.repeat(
+        feat_set_is_present,
+        "batch instances features -> batch instances (features pair)",
+        pair = 2,
+    )
+    return torch.where(feat_is_present, feat_mag, 0.0)
