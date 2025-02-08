@@ -282,3 +282,59 @@ def generate_batch(self: ToyModel, batch_size) -> Float[Tensor, "batch inst feat
     batch = torch.cat(data,dim=-1)
     return batch
 # %%
+if MAIN:
+    batch = model.generate_batch(batch_size=1)
+    correlated_feature_batch, anticorrelated_feature_batch = batch.chunk(2, dim=-1)
+
+    arena_utils.plot_correlated_features(
+        correlated_feature_batch,
+        title="Correlated feature pairs: should always co-occur",
+    )
+    arena_utils.plot_correlated_features(
+        anticorrelated_feature_batch,
+        title="Anti-correlated feature pairs: should never co-occur",
+    )
+# %%
+if MAIN:
+    cfg = ToyModelConfig(n_inst=5, n_features=4, d_hidden=2, n_correlated_pairs=2)
+    feature_probability = 400 ** -torch.linspace(0.5,1,cfg.n_inst)
+    model = ToyModel(
+        cfg = cfg,
+        device = device,
+        feature_probability=feature_probability[:,None],
+    )
+    model.optimize(steps=10_000)
+# %%
+if MAIN:
+    arena_utils.plot_features_in_2d(
+        model.W,
+        colors=["blue"]*2 + ["limegreen"]*2,
+        title="Correlated feature sets are represented in local orthogonal bases",
+        subplot_titles=[f"1-S={i:.3f}" for i in feature_probability],
+    )
+# %%
+if MAIN:
+    cfg = ToyModelConfig(n_inst=5, n_features=4, d_hidden = 2, n_anticorrelated_pairs=2)
+    feature_probability = 10 ** -torch.linspace(0.5,1,cfg.n_inst)
+    model = ToyModel(cfg=cfg, device=device, feature_probability=feature_probability[:,None])
+    model.optimize(steps=10_000)
+    arena_utils.plot_features_in_2d(
+        model.W,
+        colors=["red"]*2 + ["orange"]*2,
+        title="Anticorrelated feature sets are frequently represented as antipodal pairs",
+        subplot_titles = [f"1-S = {i:.3f}" for i in feature_probability],
+    )
+
+
+    cfg = ToyModelConfig(n_inst=5, n_features=6,d_hidden=2,n_correlated_pairs=3)
+    feature_probability = 100 ** -torch.linspace(0.5,1,cfg.n_inst)
+    model = ToyModel(cfg=cfg,device=device, feature_probability=feature_probability[:,None])
+    model.optimize(steps=10_000)
+
+    arena_utils.plot_features_in_2d(
+        model.W,
+        colors=["blue"]*2 + ["limegreen"]*2 + ["purple"]*2,
+        title="Correlated feature sets are side by side if they can't be orthogonal (and sometimes we get collapse)",
+        subplot_titles=[f"1-S = {i:.3f}" for i in feature_probability],
+    )
+# %%
