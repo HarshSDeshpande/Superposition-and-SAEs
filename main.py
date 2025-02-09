@@ -417,3 +417,48 @@ class NeuronComputationModel(ToyModel):
         error = self.importance * ((batch.abs()- out)**2)
         loss = einops.reduce(error, "batch inst feats -> inst", "mean").sum()
         return loss
+# %%
+if MAIN:
+    cfg = ToyModelConfig(n_inst=7, n_features=100,d_hidden = 40)
+    importance = 0.8 ** torch.arange(1,1+cfg.n_features)
+    feature_probability = torch.tensor([1.0,0.3,0.1,0.03,0.01,0.003,0.001])
+    model = NeuronComputationModel(
+        cfg=cfg,
+        device=device,
+        importance=importance[None,:],
+        feature_probability=feature_probability[:,None],
+    )
+    model.optimize()
+# %%
+if MAIN:
+    arena_utils.plot_features_in_Nd(
+        model.W1,
+        height=800,
+        width=1600,
+        title=f"Neuron computation model: n_features = {cfg.n_features}, d_hidden = {cfg.d_hidden}, I<sub>i</sub> = 0.75<sup>i</sup>",
+        subplot_titles=[f"1 - S = {i:.3f}" for i in feature_probability.squeeze()],
+        neuron_plot=True,
+    )
+# %%
+if MAIN:
+    cfg = ToyModelConfig(n_inst=6, n_features=20,d_hidden=10)
+
+    importance = 0.8 ** torch.arange(1,1+cfg.n_features)
+    feature_probability = 0.5
+
+    model = NeuronComputationModel(
+        cfg = cfg,
+        device = device,
+        importance=importance[None,:],
+        feature_probability=feature_probability,
+    )
+    model.optimize()
+# %%
+if MAIN:
+    arena_utils.plot_features_in_Nd_discrete(
+        W1=model.W1,
+        W2=model.W2,
+        title="Neuron computation model (colored discretely, by feature)",
+        legend_names=[f"I<sub>{i}</sub> = {importance.squeeze()[i]:.3f}" for i in range(cfg.n_features)],
+    )
+# %%
