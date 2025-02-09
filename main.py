@@ -372,3 +372,48 @@ if MAIN:
         neuron_plot = True,
     )
 # %%
+class NeuronComputationModel(ToyModel):
+    W1: Float[Tensor, "inst d_hidden feats"]
+    W2: Float[Tensor, "inst feats d_hidden"]
+    b_final: Float[Tensor, "inst feats"]
+
+    def __init__(
+        self,
+        cfg: ToyModelConfig,
+        feature_probability: float | Tensor = 1.0,
+        importance: float | Tensor = 1.0,
+        device = device,
+    ):
+        super(ToyModel, self).__init__()
+        self.cfg = cfg
+
+        if isinstance(feature_probability, float):
+            feature_probability = torch.tensor(feature_probability)
+        self.feature_probability = feature_probability.to(device).broadcast_to((cfg.n_inst,cfg.n_features))
+        if isinstance(importance, float):
+            importance = torch.tensor(importance)
+        self.importance = importance.to(device).broadcast_to((cfg.n_inst,cfg.n_features))
+
+        self.W1 = nn.Parameter(nn.init.kaiming_uniform_(torch.empty((cfg.n_inst,cfg.d_hidden,cfg.n_features))))
+        self.W2 = nn.Parameter(nn.init.kaiming_uniform_(torch.empty((cfg.n_inst,cfg.n_features,cfg.d_hidden))))
+        self.b_final = nn.Parameter(torch.zeros((cfg.n_inst,cfg.n_features)))
+        self.to(device)
+
+    def forward(self,features: Float[Tensor,"... inst feats"]) -> Float[Tensor, "... inst feats"]:
+        activations = F.relu(einops.einsum(features, self.W1,"... inst feats, inst d_hidden feats -> ... inst d_hidden"))
+        out = F.relu(einops.einsum(activations,self.W2,"... inst d_hidden, inst feats d_hidden -> ... inst feats") + self.b_final)
+        return out
+
+    def generate_batch(self, batch_size) -> Tensor:
+        feat_mag = 2* torch.rand((batch_size, self.cfg.n_inst,self.cfg.n_features),device = self.W1.device)-1
+        feat_seed = torch.rand(
+            (batch_size, self.cfg.n_inst,self.cfg.n_features),
+            device = self.W1.device,
+        )
+        batch = torch.where(feat_seed < self.feature_probability,feat_mag,0.0)
+        return batch
+
+    def calculate_loss(self, out, batch):
+        error = self.importance * ((batch.abs()- out)**2)
+        loss = einops.reduce(error, "batch inst feats -> inst", "mean").sum()
+        return loss
