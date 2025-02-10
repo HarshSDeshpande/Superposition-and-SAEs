@@ -462,3 +462,30 @@ if MAIN:
         legend_names=[f"I<sub>{i}</sub> = {importance.squeeze()[i]:.3f}" for i in range(cfg.n_features)],
     )
 # %%
+if MAIN:
+    cfg = ToyModelConfig(n_features=200,d_hidden=20,n_inst=20)
+    feature_probability = 20 ** - torch.linspace(0,1,cfg.n_inst)
+    model = ToyModel(
+        cfg=cfg,
+        device=device,
+        feature_probability=feature_probability[:,None],
+    )
+    model.optimize(steps=10_000)
+# %%
+if MAIN:
+    arena_utils.plot_feature_geometry(model)
+# %%
+if MAIN:
+    @torch.inference_mode()
+    def compute_dimensionality(W: Float[Tensor, "n_inst d_hidden n_features"]) -> Float[Tensor, "n_inst n_features"]:
+        W_norms = W.norm(dim=1, keepdim=True)
+        numerator = W_norms.squeeze()**2
+        W_normalized = W / (W_norms + 1e-8)
+        denominator = einops.einsum(W_normalized, W, "i h f1, i h f2 -> i f1 f2").pow(2).sum(-1)
+        return numerator / denominator
+# %%
+if MAIN:
+    W = model.W.detach()
+    dim_fracs = compute_dimensionality(W)
+    arena_utils.plot_feature_geometry(model,dim_fracs=dim_fracs)
+# %%
