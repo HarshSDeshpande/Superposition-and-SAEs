@@ -12,6 +12,7 @@ import plotly
 import plotly.express as px
 import torch
 import arena_utils
+import math
 from IPython.display import HTML, display
 from jaxtyping import Float
 from torch import Tensor,nn
@@ -488,4 +489,160 @@ if MAIN:
     W = model.W.detach()
     dim_fracs = compute_dimensionality(W)
     arena_utils.plot_feature_geometry(model,dim_fracs=dim_fracs)
+# %%
+NUM_WARMUP_STEPS = 2500
+NUM_BATCH_UPDATES = 50_000
+WEIGHT_DECAY = 1e-2
+LEARNING_RATE = 1e-3
+BATCH_SIZES = [3,5,6,8,10,15,30,50,100,200,500,1000,2000]
+N_FEATURES = 1000
+N_INSTANCES = 5
+D_HIDDEN = 2
+SPARSITY = 0.99
+FEATURE_PROBABILITY = 1 - SPARSITY
+# %%
+def linear_warmup_lr(step,steps):
+    return step/steps
+
+def anthropic_lr(step,steps):
+    if step < NUM_WARMUP_STEPS:
+        return linear_warmup_lr(step,NUM_WARMUP_STEPS)
+    else:
+        return cosine_decay_lr(step - NUM_WARMUP_STEPS, steps - NUM_WARMUP_STEPS)
+# %%
+class DoubleDescentModel(ToyModel):
+    W: Float[Tensor, "inst d_hidden feats"]
+    b_final: Float[Tensor, "inst feats"]
+
+    @classmethod
+    def dimensionality(cls, data: Float[Tensor, "... batch d_hidden"]) -> Float[Tensor,"... batch"]:
+        squared_norms = einops.reduce(data.pow(2), "... batch d_hidden -> ... batch", "sum")
+        data_normed = data/data.norm(dim=-1,keepdim=True)
+        interference = einops.einsum(
+            data_normed, data, "... batch_i d_hidden, ... batch_j d_hidden -> ... batch_i batch_j"
+        )
+        polysemanticity = einops.reduce(interference.pow(2), "... batch_i batch_j -> batch_i","sum")
+        assert squared_norms.shape == polysemanticity.shape
+        return squared_norms / polysemanticity
+    
+    def generate_batch(self, batch_size):
+        batch = super().generate_batch(batch_size)
+        norms = batch.norm(dim=-1,keepdim=True)
+        norms = torch.where(norms.abs() < 1e-6, torch.ones_like(norms),norms)
+        batch_normed = batch/norms
+        return batch_normed
+    
+    def calculate_loss(
+        self,
+        out: Float[Tensor,"batch inst feats"],
+        batch: Float[Tensor, "batch inst feats"],
+        per_inst: bool = False,
+    ) -> Float[Tensor, "inst"]:
+        error = self.importance * ((batch - out) ** 2)
+        loss = einops.reduce(error, "batch inst feats -> inst", "mean")
+        return loss if per_inst else loss.sum()
+    
+    def optimize(
+        self,
+        batch_size: int,
+        steps: int = NUM_BATCH_UPDATES,
+        log_freq: int = 100,
+        lr: float = LEARNING_RATE,
+        lr_scale: Callable[[int,int],float] = anthropic_lr,
+        weight_decay: float = WEIGHT_DECAY,
+    ) -> tuple[Tensor,Tensor]:
+        optimizer = torch.optim.AdamW(list(self.parameters()),lr=lr,weight_decay=weight_decay)
+        progress_bar = tqdm(range(steps))
+        batch = self.generate_batch(batch_size)
+        
+        for step in progress_bar:
+            step_lr = lr * lr_scale(step,steps)
+            for group in optimizer.param_groups:
+                group["lr"] = step_lr
+
+            optimizer.zero_grad()
+            out = self.forward(batch)
+            loss = self.calculate_loss(out,batch)
+            loss.backward()
+            optimizer.step()
+
+            if (step % log_freq == 0) or (step + 1 == steps):
+                progress_bar.set_postfix(loss = loss.item() / self.cfg.n_inst, lr = step_lr)
+
+        with torch.inference_mode():
+            out = self.forward(batch)
+            loss_per_inst = self.calculate_loss(out,batch,per_inst=True)
+            best_inst = loss_per_inst.argmin()
+            print(f"Best instance = #{best_inst}, with loss {loss_per_inst[best_inst].item():.4e}")
+
+        return batch[:,best_inst],self.W[best_inst].detach()
+# %%
+if MAIN:
+    features_list = []
+    hidden_representations_list = []
+
+    for batch_size in tqdm(BATCH_SIZES):
+        cfg = ToyModelConfig(n_features= N_FEATURES, n_inst = N_INSTANCES, d_hidden = D_HIDDEN)
+        model = DoubleDescentModel(cfg, feature_probability=FEATURE_PROBABILITY).to(device)
+        batch_inst, W_inst = model.optimize(steps=15_000,batch_size=batch_size)
+        with torch.inference_mode():
+            hidden = einops.einsum(batch_inst, W_inst, "batch features, hidden features -> hidden batch")
+        features_list.append(W_inst.cpu())
+        hidden_representations_list.append(hidden.cpu())
+
+    arena_utils.plot_features_in_2d(
+        features_list + hidden_representations_list,
+        colors=[["blue"] for _ in range(len(BATCH_SIZES))] +[["red"] for _ in range(len(BATCH_SIZES))],
+        title="Double Descent & Superposition (num features = 1000)",
+        subplot_titles=[f"Features (batch={bs})" for bs in BATCH_SIZES] + [f"Data (batch={bs})" for bs in BATCH_SIZES],
+        allow_different_limits_across_subplots=True,
+        n_rows=2,
+    )
+
+    df_data = {"Batch size": [], "Dimensionality": [], "Data": []}
+
+    for batch_size, model_W,hidden in zip(BATCH_SIZES,features_list,hidden_representations_list):
+        df_data["Batch size"].extend([batch_size]*(N_FEATURES + batch_size))
+        df_data["Data"].extend(["features"] * N_FEATURES + ["hidden"]* batch_size)
+        feature_dim = DoubleDescentModel.dimensionality(model_W.T)
+        assert feature_dim.shape == (N_FEATURES,)
+        data_dim = DoubleDescentModel.dimensionality(hidden.T)
+        assert data_dim.shape == (batch_size,)
+        df_data["Dimensionality"].extend(feature_dim.tolist() + data_dim.tolist())
+
+    df = pd.DataFrame(df_data)
+    eps = 0.01
+    xline1,xline2 = (100 * 200) ** 0.5, (500*1000)**0.5
+    vrect_kwargs: dict[str,Any] = dict(opacity=0.5, layer="below",line_width=0)
+    xrange = [math.log10(1.5),math.log10(5000)]
+    fig = (
+        px.strip(
+            df,
+            x="Batch size",
+            y="Dimensionality",
+            color="Data",
+            color_discrete_sequence=["rgba(0,0,255,0.3)","rgba(255,0,0,0.3)"],
+            log_x=True,
+            template="simple_white",
+            width=1000,
+            height=600,
+            title="Dimensionality of features & hidden representation of training examples",
+        )
+        .update_traces(marker=dict(opacity=0.5))
+        .update_layout(
+            xaxis=dict(range=xrange,tickmode="array",tickvals=BATCH_SIZES),
+            yaxis=dict(range=[-0.05,1.0]),
+        )
+        .add_vrect(x0=1,x1=(1-eps)*xline1,fillcolor="#ddd",**vrect_kwargs)
+        .add_vrect(x0=(1+eps)*xline1,x1=(1-eps)*xline2,fillcolor="#ccc",**vrect_kwargs)
+        .add_scatter(
+            x=BATCH_SIZES,
+            y= [2 / b for b in BATCH_SIZES],
+            mode = "lines",
+            line = dict(shape="spline",dash = "dot",color="#333", width = 1),
+            name = "d_hidden / batch_size",
+        )
+    )
+    
+    fig.show()
 # %%
